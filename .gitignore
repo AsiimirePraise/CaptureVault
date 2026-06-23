@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/CaptureVault/
+*.spec.bak
+.pytest_cache/
+.mypy_cache/
+*.db
+capturevault_backup.db
