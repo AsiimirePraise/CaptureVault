@@ -18,8 +18,9 @@ from capturevault.config import AppConfig
 from capturevault.core.thumbnails import ThumbnailService
 from capturevault.database.manager import DatabaseManager
 from capturevault.ui.dialogs.metadata_dialog import MetadataDialog
+from capturevault.core.autodiscover import ensure_laptop_coverage
+from capturevault.ui.dialogs.welcome_dialog import WelcomeDialog
 from capturevault.ui.dialogs.settings_dialog import SettingsDialog
-from capturevault.ui.dialogs.setup_wizard import SetupWizard
 from capturevault.ui.dialogs.update_dialog import UpdateDialog
 from capturevault.ui.styles import get_stylesheet
 from capturevault.ui.views.collections_view import CollectionsView
@@ -62,18 +63,15 @@ class MainWindow(QMainWindow):
         self._update_worker: UpdateCheckWorker | None = None
         self._search_generation = 0
 
-        self.setWindowTitle("CaptureVault")
+        self.setWindowTitle(f"CaptureVault v{config.version}")
         self.setMinimumSize(1100, 700)
         self.resize(1280, 800)
 
         self._apply_theme()
         self._setup_ui()
         self._connect_signals()
-
-        if not config.first_run_complete or not self._db.has_monitored_folders():
-            self._show_setup_wizard()
-        else:
-            self._start_initial_index()
+        self._refresh_folder_filters()
+        self._bootstrap_automation()
 
         if config.check_updates_on_startup:
             QTimer.singleShot(2000, self._check_updates)
@@ -154,8 +152,7 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         self._sidebar.navigation_changed.connect(self._on_navigate)
-        self._search_bar.search_requested.connect(self._run_search)
-        self._search_bar.clear_requested.connect(lambda: self._run_search(""))
+        self._search_bar.search_triggered.connect(self._run_search)
 
         for grid in (
             self._search_view.grid,
@@ -186,25 +183,44 @@ class MainWindow(QMainWindow):
         elif key == "collections":
             self._collections.refresh()
         elif key == "search":
+            self._refresh_folder_filters()
             self._search_bar.focus_input()
-            self._run_search(self._search_bar.query())
+            self._run_search()
 
-    def _show_setup_wizard(self) -> None:
-        wizard = SetupWizard(self._db, self)
-        if wizard.exec():
+    def _refresh_folder_filters(self) -> None:
+        folders = [f["path"] for f in self._db.get_monitored_folders()]
+        self._search_bar.set_folder_choices(folders)
+
+    def _bootstrap_automation(self) -> None:
+        """Auto-discover folders, open search immediately, index in background."""
+        added = ensure_laptop_coverage(self._db)
+
+        first_launch = not self._config.first_run_complete
+        if first_launch:
             self._config.first_run_complete = True
+            folder_count = len(self._db.get_monitored_folders())
+            QTimer.singleShot(
+                400,
+                lambda: WelcomeDialog(folder_count, self).exec(),
+            )
+
+        self._sidebar.select("search")
+        self._stack.setCurrentIndex(1)
+        self._search_bar.focus_input()
+        self._run_search()
+
+        if added:
+            self._status_label.setText(
+                f"Indexing your laptop ({len(added)} location(s))..."
+            )
             self._start_scan(full=True)
         else:
-            if not self._db.has_monitored_folders():
-                QMessageBox.warning(
-                    self,
-                    "Setup Required",
-                    "Please add at least one folder to use CaptureVault.",
-                )
-                self._show_setup_wizard()
+            self._start_initial_index()
 
     def _start_initial_index(self) -> None:
-        self._start_scan(full=True)
+        """Quick scan on normal startup; full scan only when library is empty."""
+        stats = self._db.get_dashboard_stats()
+        self._start_scan(full=stats["total_files"] == 0)
 
     def _start_scan(self, full: bool = True) -> None:
         if self._indexer and self._indexer.isRunning():
@@ -243,7 +259,8 @@ class MainWindow(QMainWindow):
             msg += f", removed {removed:,}"
         self._status_label.setText(msg)
         self._dashboard.refresh()
-        self._run_search(self._search_bar.query())
+        self._refresh_folder_filters()
+        self._run_search()
 
     def _on_index_error(self, message: str) -> None:
         self._scan_btn.setEnabled(True)
@@ -252,9 +269,11 @@ class MainWindow(QMainWindow):
         self._status_label.setText("Indexing error")
         QMessageBox.critical(self, "Indexing Error", message)
 
-    def _run_search(self, query: str) -> None:
+    def _run_search(self) -> None:
         self._search_generation += 1
         generation = self._search_generation
+        query = self._search_bar.query()
+        filters = self._search_bar.get_filters()
 
         self._sidebar.select("search")
         self._stack.setCurrentIndex(1)
@@ -263,6 +282,7 @@ class MainWindow(QMainWindow):
             self._config.db_path,
             query,
             generation,
+            filters=filters,
             parent=self,
         )
         self._search_worker.results_ready.connect(self._on_search_results)
@@ -271,13 +291,51 @@ class MainWindow(QMainWindow):
     def _on_search_results(self, generation: int, results: list) -> None:
         if generation != self._search_generation:
             return
-        self._search_view.set_results(results)
-        self._status_label.setText(f"{len(results):,} results")
+
+        query = self._search_bar.query().strip()
+        filters = self._search_bar.get_filters()
+        total = self._db.get_dashboard_stats()["total_files"]
+        scope = f"{filters.type_label()} · {filters.folder_label()}"
+
+        if not results and query:
+            empty_msg = (
+                f'No matches for "{query}" ({filters.type_label()}, '
+                f'{filters.folder_label()}).\n'
+                "The file may not be indexed yet — wait for scanning to finish,\n"
+                "try Word (.doc/.docx) filter, or click Full Rescan."
+            )
+        elif not results and total == 0:
+            empty_msg = (
+                "Still indexing your files — search again in a moment,\n"
+                "or click Full Rescan in the toolbar."
+            )
+        elif not results:
+            empty_msg = (
+                f"{total:,} files indexed.\n"
+                "Type any part of a file name — exact names not required."
+            )
+        else:
+            empty_msg = ""
+
+        self._search_view.set_results(results, empty_msg)
+
+        if results:
+            self._status_label.setText(
+                f"{len(results):,} results · {scope}"
+            )
+        elif query:
+            self._status_label.setText(
+                f'No matches for "{query}" · {scope}'
+            )
+        elif total == 0:
+            self._status_label.setText("Indexing in progress...")
+        else:
+            self._status_label.setText(f"{total:,} files · {scope}")
 
     def _edit_metadata(self, file_id: int) -> None:
         dialog = MetadataDialog(self._db, file_id, self)
         if dialog.exec():
-            self._run_search(self._search_bar.query())
+            self._run_search()
             self._dashboard.refresh()
 
     def _open_settings(self) -> None:
@@ -285,6 +343,7 @@ class MainWindow(QMainWindow):
         if dialog.exec():
             self._apply_theme()
             self._thumb_service.size = self._config.thumbnail_size
+            self._refresh_folder_filters()
             self._dashboard.refresh()
 
     def _check_updates(self) -> None:

@@ -55,6 +55,28 @@ QListWidget, QTreeWidget, QTableWidget {
     border-radius: 6px;
     alternate-background-color: #F8F8F8;
     gridline-color: #E8E8E8;
+    selection-background-color: #D4D4D4;
+    selection-color: #1A1A1A;
+    outline: none;
+}
+
+QTableWidget::item {
+    padding: 6px 8px;
+    border: none;
+}
+
+QTableWidget::item:selected {
+    background-color: #D4D4D4;
+    color: #1A1A1A;
+}
+
+QTableWidget::item:hover {
+    background-color: #ECECEC;
+}
+
+QTableWidget::item:focus {
+    outline: none;
+    border: none;
 }
 
 QListWidget::item, QTreeWidget::item {
@@ -215,6 +237,38 @@ QListWidget, QTreeWidget, QTableWidget {
     background-color: #252525;
     border: 1px solid #404040;
     color: #E8E8E8;
+    alternate-background-color: #2A2A2A;
+    selection-background-color: #404040;
+    selection-color: #FFFFFF;
+    outline: none;
+}
+
+QTableWidget::item {
+    padding: 6px 8px;
+    border: none;
+}
+
+QTableWidget::item:selected {
+    background-color: #404040;
+    color: #FFFFFF;
+}
+
+QTableWidget::item:hover {
+    background-color: #333333;
+}
+
+QTableWidget::item:focus {
+    outline: none;
+    border: none;
+}
+
+QHeaderView::section {
+    background-color: #2A2A2A;
+    color: #C0C0C0;
+    padding: 8px;
+    border: none;
+    border-bottom: 1px solid #404040;
+    font-weight: 600;
 }
 
 QFrame#sidebar {

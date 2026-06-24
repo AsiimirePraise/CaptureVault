@@ -39,6 +39,15 @@ def _classify_extension(ext: str) -> str:
     return FILE_TYPE_OTHER
 
 
+def folder_like_pattern(folder_prefix: str) -> str:
+    """Build SQL LIKE pattern for a folder (handles D: vs D:\\ paths)."""
+    p = folder_prefix.strip().rstrip("\\/")
+    p = p.replace("/", "\\")
+    if len(p) == 2 and p[1] == ":":
+        return p[0].upper() + p[1] + "%"
+    return p + "%"
+
+
 class DatabaseManager:
     """Thread-safe SQLite access layer."""
 
@@ -486,6 +495,10 @@ class DatabaseManager:
         # Escape FTS special chars and build prefix tokens
         tokens = []
         for token in query.strip().split():
+            # Keep extension tokens like .doc intact
+            if token.startswith(".") and len(token) > 1:
+                tokens.append(f'"{token.lower()}"*')
+                continue
             cleaned = "".join(
                 c for c in token if c.isalnum() or c in ("_", "-")
             )
@@ -540,13 +553,135 @@ class DatabaseManager:
                OR f.virtual_name LIKE ? COLLATE NOCASE
                OR f.folder_name LIKE ? COLLATE NOCASE
                OR f.notes LIKE ? COLLATE NOCASE
+               OR f.extension LIKE ? COLLATE NOCASE
                OR t.name LIKE ? COLLATE NOCASE
                OR c.name LIKE ? COLLATE NOCASE
             LIMIT ?
             """,
-            (pattern, pattern, pattern, pattern, pattern, pattern, limit),
+            (
+                pattern, pattern, pattern, pattern, pattern,
+                pattern, pattern, limit,
+            ),
         )
         return [r["id"] for r in rows]
+
+    def get_files_by_extension(
+        self, extension: str, limit: int = 500
+    ) -> list[dict]:
+        """Find all files with a given extension, e.g. .doc or .pdf."""
+        ext = extension.lower().strip()
+        if not ext.startswith("."):
+            ext = f".{ext}"
+        rows = self._fetchall(
+            """
+            SELECT * FROM files
+            WHERE extension = ? COLLATE NOCASE
+            ORDER BY date_modified DESC
+            LIMIT ?
+            """,
+            (ext, limit),
+        )
+        return [dict(r) for r in rows]
+
+    def get_files_by_types(
+        self,
+        file_types: tuple[str, ...] | list[str],
+        folder_prefix: str | None = None,
+        limit: int = 500,
+    ) -> list[dict]:
+        """Find files matching one or more file_type values."""
+        if not file_types:
+            return []
+        placeholders = ",".join("?" * len(file_types))
+        params: list = list(file_types)
+        sql = f"""
+            SELECT * FROM files
+            WHERE file_type IN ({placeholders})
+        """
+        if folder_prefix:
+            sql += " AND path LIKE ? COLLATE NOCASE"
+            params.append(folder_like_pattern(folder_prefix))
+        sql += " ORDER BY date_modified DESC LIMIT ?"
+        params.append(limit)
+        rows = self._fetchall(sql, tuple(params))
+        return [dict(r) for r in rows]
+
+    def get_files_by_extensions(
+        self,
+        extensions: frozenset[str] | list[str],
+        folder_prefix: str | None = None,
+        limit: int = 500,
+    ) -> list[dict]:
+        """Find files matching one or more extensions (e.g. all Word docs)."""
+        if not extensions:
+            return []
+        ext_list = [
+            e if e.startswith(".") else f".{e}" for e in extensions
+        ]
+        placeholders = ",".join("?" * len(ext_list))
+        params: list = list(ext_list)
+        sql = f"""
+            SELECT * FROM files
+            WHERE extension IN ({placeholders})
+        """
+        if folder_prefix:
+            sql += " AND path LIKE ? COLLATE NOCASE"
+            params.append(folder_like_pattern(folder_prefix))
+        sql += " ORDER BY date_modified DESC LIMIT ?"
+        params.append(limit)
+        rows = self._fetchall(sql, tuple(params))
+        return [dict(r) for r in rows]
+
+    def search_scoped(
+        self,
+        query: str,
+        extensions: frozenset[str] | list[str] | None = None,
+        folder_prefix: str | None = None,
+        limit: int = 300,
+    ) -> list[dict]:
+        """Search file names within optional extension and folder scope."""
+        if not query.strip():
+            return []
+        pattern = f"%{query.strip()}%"
+        params: list = [pattern, pattern, pattern, pattern]
+        sql = """
+            SELECT * FROM files
+            WHERE (
+                file_name LIKE ? COLLATE NOCASE
+                OR virtual_name LIKE ? COLLATE NOCASE
+                OR notes LIKE ? COLLATE NOCASE
+                OR folder_name LIKE ? COLLATE NOCASE
+            )
+        """
+        if extensions:
+            ext_list = [
+                e if e.startswith(".") else f".{e}" for e in extensions
+            ]
+            ph = ",".join("?" * len(ext_list))
+            sql += f" AND extension IN ({ph})"
+            params.extend(ext_list)
+        if folder_prefix:
+            sql += " AND path LIKE ? COLLATE NOCASE"
+            params.append(folder_like_pattern(folder_prefix))
+        sql += " ORDER BY date_modified DESC LIMIT ?"
+        params.append(limit)
+        rows = self._fetchall(sql, tuple(params))
+        return [dict(r) for r in rows]
+
+    def get_files_in_folder(
+        self, folder_prefix: str, limit: int = 500
+    ) -> list[dict]:
+        """Find all indexed files under a folder path."""
+        rows = self._fetchall(
+            """
+            SELECT * FROM files
+            WHERE path LIKE ? COLLATE NOCASE
+            ORDER BY date_modified DESC
+            LIMIT ?
+            """,
+            (folder_like_pattern(folder_prefix), limit),
+        )
+        return [dict(r) for r in rows]
 
     def get_tags_map_for_files(self, file_ids: list[int]) -> dict[int, list[str]]:
         if not file_ids:

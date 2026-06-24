@@ -5,6 +5,7 @@ from datetime import datetime
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QPixmap
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -55,6 +56,7 @@ class ResultsGrid(QTableWidget):
         self._setup_ui()
 
     def _setup_ui(self) -> None:
+        self.setObjectName("resultsGrid")
         self.setColumnCount(len(self.COLUMNS))
         self.setHorizontalHeaderLabels([c[1] for c in self.COLUMNS])
         self.horizontalHeader().setSectionResizeMode(
@@ -66,12 +68,19 @@ class ResultsGrid(QTableWidget):
         self.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.setAlternatingRowColors(True)
         self.setShowGrid(False)
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
         self.cellDoubleClicked.connect(self._on_double_click)
+        self.cellClicked.connect(self._on_cell_clicked)
 
         for i, (_, _, width) in enumerate(self.COLUMNS):
             self.setColumnWidth(i, width)
+
+    def _on_cell_clicked(self, row: int, _col: int) -> None:
+        """Always highlight the full row when any cell is clicked."""
+        self.selectRow(row)
 
     def set_results(self, files: list[dict]) -> None:
         self._loader._run_id += 1
@@ -90,7 +99,9 @@ class ResultsGrid(QTableWidget):
                 label = QLabel("…")
                 label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 label.setFixedSize(thumb_size, thumb_size)
+                label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                 container = QWidget()
+                container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                 lay = QHBoxLayout(container)
                 lay.setContentsMargins(4, 4, 4, 4)
                 lay.addWidget(label)
@@ -98,11 +109,18 @@ class ResultsGrid(QTableWidget):
                 color = file_data.get("color_label")
                 if color and color in COLOR_DOT:
                     dot = QLabel("●")
+                    dot.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                     dot.setStyleSheet(
                         f"color: {COLOR_DOT[color]}; font-size: 14px;"
                     )
                     lay.addWidget(dot)
 
+                # Placeholder item so the whole row selects evenly (not patchy blue)
+                thumb_item = QTableWidgetItem()
+                thumb_item.setFlags(
+                    Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                )
+                self.setItem(row, 0, thumb_item)
                 self.setCellWidget(row, 0, container)
                 self._thumb_labels[row] = label
 
@@ -162,7 +180,9 @@ class ResultsGrid(QTableWidget):
 
     def _set_item(self, row: int, col: int, text: str, bold: bool = False) -> None:
         item = QTableWidgetItem(text)
-        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        item.setFlags(
+            Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        )
         if bold:
             font = item.font()
             font.setBold(True)

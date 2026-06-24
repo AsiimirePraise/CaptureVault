@@ -13,6 +13,7 @@ from capturevault.constants import (
     FILE_TYPE_VIDEO,
     RATING_QUERY_PREFIX,
 )
+from capturevault.core.search_filters import SearchFilters
 from capturevault.database.manager import DatabaseManager
 
 
@@ -20,6 +21,25 @@ STAR_PATTERN = re.compile(r"(\d)\s*stars?", re.IGNORECASE)
 COLOR_PATTERN = re.compile(
     r"\b(red|yellow|green|blue|purple)\b", re.IGNORECASE
 )
+EXT_QUERY = re.compile(
+    r"^(?:\*?\.|ext:)([a-z0-9]+)$", re.IGNORECASE
+)
+
+
+def _parse_extension_query(text: str) -> str | None:
+    """Detect extension searches: .doc, *.doc, ext:doc, .pdf"""
+    raw = text.strip().lower()
+    if not raw:
+        return None
+
+    match = EXT_QUERY.match(raw)
+    if match:
+        return f".{match.group(1)}"
+
+    if raw.startswith(".") and len(raw) > 1 and raw[1:].replace("_", "").isalnum():
+        return raw
+
+    return None
 
 
 def _parse_query(query: str) -> dict[str, Any]:
@@ -34,6 +54,10 @@ def _parse_query(query: str) -> dict[str, Any]:
     }
 
     if not text:
+        return result
+
+    if _parse_extension_query(text):
+        result["text"] = text
         return result
 
     rating_match = re.search(
@@ -64,6 +88,9 @@ def _parse_query(query: str) -> dict[str, Any]:
         "video": (FILE_TYPE_VIDEO,),
         "documents": (FILE_TYPE_DOCUMENT,),
         "document": (FILE_TYPE_DOCUMENT,),
+        "word": (FILE_TYPE_DOCUMENT,),
+        "pdf": (FILE_TYPE_DOCUMENT,),
+        "pdfs": (FILE_TYPE_DOCUMENT,),
     }
     for keyword, types in type_keywords.items():
         if re.search(rf"\b{keyword}\b", lower):
@@ -90,12 +117,32 @@ def _build_searchable_text(
     parts = [
         file_data.get("virtual_name") or "",
         file_data.get("file_name") or "",
+        file_data.get("extension") or "",
         file_data.get("folder_name") or "",
         file_data.get("notes") or "",
         " ".join(tags),
         " ".join(collections),
     ]
     return " ".join(p for p in parts if p).lower()
+
+
+def _letters_in_order(needle: str, haystack: str) -> bool:
+    """True if all letters in needle appear in haystack in order."""
+    i = 0
+    for c in haystack.lower():
+        if i < len(needle) and c == needle[i]:
+            i += 1
+    return i == len(needle)
+
+
+def _min_match_score(text: str) -> float:
+    """Lower bar for short / partial queries."""
+    n = len(text.strip())
+    if n <= 2:
+        return 15.0
+    if n <= 4:
+        return 25.0
+    return 35.0
 
 
 def _score_match(query: str, searchable: str, file_data: dict) -> float:
@@ -107,8 +154,26 @@ def _score_match(query: str, searchable: str, file_data: dict) -> float:
     scores: list[float] = []
 
     virtual = (file_data.get("virtual_name") or "").lower()
+    fname = (file_data.get("file_name") or "").lower()
+
     if virtual:
         scores.append(fuzz.partial_ratio(q, virtual) * 1.5)
+        if _letters_in_order(q, virtual):
+            scores.append(90.0)
+
+    if fname:
+        scores.append(fuzz.partial_ratio(q, fname) * 1.2)
+        if _letters_in_order(q, fname):
+            scores.append(85.0)
+        if q in fname:
+            scores.append(95.0)
+
+    # Each word typed can match anywhere (e.g. "bride aisle" -> "Bride Walking Aisle")
+    tokens = q.split()
+    if len(tokens) > 1:
+        token_hits = [fuzz.partial_ratio(t, searchable) for t in tokens if t]
+        if token_hits:
+            scores.append(min(token_hits) * 1.1)
 
     scores.append(fuzz.partial_ratio(q, searchable))
     scores.append(fuzz.token_set_ratio(q, searchable))
@@ -125,31 +190,93 @@ class SearchEngine:
     def __init__(self, db: DatabaseManager) -> None:
         self._db = db
 
-    def search(self, query: str, limit: int = 200) -> list[dict]:
+    def search(
+        self,
+        query: str,
+        limit: int = 200,
+        filters: SearchFilters | None = None,
+    ) -> list[dict]:
+        filters = filters or SearchFilters()
         parsed = _parse_query(query)
 
         if not parsed["text"] and any(
             parsed[k]
             for k in ("rating", "color", "favorites_only", "file_type")
         ):
-            return self._filter_only(parsed, limit)
+            return self._filter_only(parsed, filters, limit)
 
         text = parsed["text"]
+        has_ui_filters = (
+            filters.type_filter != "all" or filters.folder_path is not None
+        )
+
         if not text and not any(
             parsed[k]
             for k in ("rating", "color", "favorites_only", "file_type")
         ):
-            return self._enrich_files(self._db.get_recent_files(limit))
+            if has_ui_filters:
+                return self._browse_filtered(filters, limit)
+            return self._enrich_files(
+                self._db.get_recent_files(min(limit, 200))
+            )
 
+        extension = _parse_extension_query(text)
+        if extension:
+            files = self._db.get_files_by_extension(extension, limit=limit * 2)
+            filtered = [
+                f
+                for f in files
+                if self._passes_filters(f, parsed, filters)
+            ]
+            return self._enrich_files(filtered[:limit])
+
+        # Scoped name search — reliable for documents in a chosen folder
+        if text and (
+            filters.extensions() or filters.folder_path or filters.type_filter != "all"
+        ):
+            scoped = self._db.search_scoped(
+                text,
+                extensions=filters.extensions(),
+                folder_prefix=filters.folder_path,
+                limit=limit * 2,
+            )
+            if scoped:
+                filtered = [
+                    f
+                    for f in scoped
+                    if self._passes_filters(f, parsed, filters)
+                ]
+                if filtered:
+                    return self._enrich_files(filtered[:limit])
+
+        like_limit = 1200 if len(text) <= 4 else 600
         fts_ids = self._db.search_fts(text, limit=limit * 3)
-        like_ids = self._db.search_like(text, limit=limit * 3)
+        like_ids = self._db.search_like(text, limit=like_limit)
         candidate_ids = list(dict.fromkeys(fts_ids + like_ids))
         like_set = set(like_ids)
 
-        if candidate_ids:
-            candidates = self._db.get_files_by_ids(candidate_ids)
-        else:
-            candidates = []
+        candidates = (
+            self._db.get_files_by_ids(candidate_ids) if candidate_ids else []
+        )
+
+        # Fuzzy fallback — partial names, no exact match required
+        if text and len(candidates) < limit:
+            pool = self._get_search_pool(filters, limit=2000)
+            pool_ids = {c["id"] for c in candidates}
+            min_score = _min_match_score(text)
+            for file_data in pool:
+                if file_data["id"] in pool_ids:
+                    continue
+                if not self._passes_filters(file_data, parsed, filters):
+                    continue
+                tags = []  # scored lightly without tags for speed
+                searchable = _build_searchable_text(file_data, tags, [])
+                score = _score_match(text, searchable, file_data)
+                if score >= min_score:
+                    candidates.append(file_data)
+                    pool_ids.add(file_data["id"])
+                if len(candidates) >= limit * 2:
+                    break
 
         id_order = {fid: i for i, fid in enumerate(candidate_ids)}
         fts_set = set(fts_ids)
@@ -160,7 +287,7 @@ class SearchEngine:
 
         results: list[tuple[float, dict]] = []
         for file_data in candidates:
-            if not self._passes_filters(file_data, parsed):
+            if not self._passes_filters(file_data, parsed, filters):
                 continue
 
             fid = file_data["id"]
@@ -170,12 +297,16 @@ class SearchEngine:
 
             if text:
                 score = _score_match(text, searchable, file_data)
-                if score < 40 and fid not in fts_set and fid not in like_set:
+                min_score = _min_match_score(text)
+                if (
+                    score < min_score
+                    and fid not in fts_set
+                    and fid not in like_set
+                ):
                     continue
-                # Prefer virtual-name matches and FTS hits
                 if fid in fts_set:
                     score += 10
-                if fid in like_ids:
+                if fid in like_set:
                     score += 5
             else:
                 score = 100.0
@@ -191,6 +322,58 @@ class SearchEngine:
         )
         return [r[1] for r in results[:limit]]
 
+    def _browse_filtered(
+        self, filters: SearchFilters, limit: int
+    ) -> list[dict]:
+        """List files matching UI type/folder filters with no search text."""
+        exts = filters.extensions()
+        if exts:
+            files = self._db.get_files_by_extensions(
+                exts,
+                folder_prefix=filters.folder_path,
+                limit=limit * 2,
+            )
+        else:
+            types = filters.file_types()
+            if types:
+                files = self._db.get_files_by_types(
+                    types, folder_prefix=filters.folder_path, limit=limit * 2
+                )
+            elif filters.folder_path:
+                files = self._db.get_files_in_folder(
+                    filters.folder_path, limit=limit * 2
+                )
+            else:
+                files = self._db.get_recent_files(limit)
+
+        filtered = [f for f in files if filters.matches_file(f)]
+        return self._enrich_files(filtered[:limit])
+
+    def _get_search_pool(
+        self, filters: SearchFilters, limit: int = 2000
+    ) -> list[dict]:
+        """Files to scan for fuzzy matching within current filters."""
+        exts = filters.extensions()
+        if exts:
+            files = self._db.get_files_by_extensions(
+                exts,
+                folder_prefix=filters.folder_path,
+                limit=limit,
+            )
+        else:
+            types = filters.file_types()
+            if types:
+                files = self._db.get_files_by_types(
+                    types, folder_prefix=filters.folder_path, limit=limit
+                )
+            elif filters.folder_path:
+                files = self._db.get_files_in_folder(
+                    filters.folder_path, limit=limit
+                )
+            else:
+                files = self._db.get_all_files(limit=limit)
+        return [f for f in files if filters.matches_file(f)]
+
     def _enrich_files(self, files: list[dict]) -> list[dict]:
         if not files:
             return []
@@ -205,7 +388,14 @@ class SearchEngine:
             enriched.append(item)
         return enriched
 
-    def _passes_filters(self, file_data: dict, parsed: dict) -> bool:
+    def _passes_filters(
+        self,
+        file_data: dict,
+        parsed: dict,
+        filters: SearchFilters,
+    ) -> bool:
+        if not filters.matches_file(file_data):
+            return False
         if parsed["rating"] is not None:
             if file_data.get("rating", 0) != parsed["rating"]:
                 return False
@@ -220,7 +410,12 @@ class SearchEngine:
                 return False
         return True
 
-    def _filter_only(self, parsed: dict, limit: int) -> list[dict]:
+    def _filter_only(
+        self,
+        parsed: dict,
+        filters: SearchFilters,
+        limit: int,
+    ) -> list[dict]:
         if parsed["rating"] is not None:
             files = self._db.get_files_by_rating(parsed["rating"])
         elif parsed["color"]:
@@ -228,11 +423,19 @@ class SearchEngine:
         elif parsed["favorites_only"]:
             files = self._db.get_favorites()
         else:
-            files = self._db.get_all_files(limit)
+            files = self._browse_filtered(filters, limit * 2)
+            if parsed["file_type"]:
+                files = [
+                    f
+                    for f in files
+                    if f.get("file_type") in parsed["file_type"]
+                ]
+            return self._enrich_files(files[:limit])
 
         if parsed["file_type"]:
             files = [
                 f for f in files if f.get("file_type") in parsed["file_type"]
             ]
 
+        files = [f for f in files if filters.matches_file(f)]
         return self._enrich_files(files[:limit])

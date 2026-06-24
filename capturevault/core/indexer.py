@@ -1,8 +1,35 @@
 """File indexing utilities."""
 
+import os
 from pathlib import Path
 
+from capturevault.core.exclusions import should_skip_dir
 from capturevault.database.manager import DatabaseManager
+
+
+def _iter_files(
+    folder_path: Path,
+    cancel_check=None,
+):
+    """Walk folder tree, skipping system and cache directories."""
+    folder_path = folder_path.resolve()
+    if not folder_path.exists():
+        return
+
+    for dirpath, dirnames, filenames in os.walk(folder_path, topdown=True):
+        if cancel_check and cancel_check():
+            break
+
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if not should_skip_dir(Path(dirpath) / d)
+        ]
+
+        for name in filenames:
+            if cancel_check and cancel_check():
+                break
+            yield Path(dirpath) / name
 
 
 def scan_folder(
@@ -17,14 +44,8 @@ def scan_folder(
     """
     indexed = 0
     skipped = 0
-    folder_path = folder_path.resolve()
 
-    if not folder_path.exists():
-        return indexed, skipped
-
-    for file_path in folder_path.rglob("*"):
-        if cancel_check and cancel_check():
-            break
+    for file_path in _iter_files(folder_path, cancel_check):
         if not file_path.is_file():
             continue
         if not DatabaseManager.is_supported_file(file_path):
@@ -68,9 +89,7 @@ def quick_scan_folder(
             db.remove_file_by_path(path)
         return 0, len(existing), 0
 
-    for file_path in folder_path.rglob("*"):
-        if cancel_check and cancel_check():
-            break
+    for file_path in _iter_files(folder_path, cancel_check):
         if not file_path.is_file():
             continue
         resolved = str(file_path.resolve())
@@ -86,6 +105,7 @@ def quick_scan_folder(
             stored = existing[resolved].get("date_modified", "")
             try:
                 from datetime import datetime
+
                 stored_mtime = datetime.fromisoformat(stored).timestamp()
             except (ValueError, TypeError):
                 stored_mtime = 0

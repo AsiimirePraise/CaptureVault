@@ -26,6 +26,7 @@ from capturevault.constants import (
     THEME_LIGHT,
 )
 from capturevault.database.manager import DatabaseManager
+from capturevault.core.autodiscover import add_missing_laptop_folders
 
 
 class SettingsDialog(QDialog):
@@ -49,9 +50,17 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
 
-        # Folders
+        # Folders (optional — defaults are added automatically on first launch)
         folder_group = QGroupBox("Monitored Folders")
         folder_layout = QVBoxLayout(folder_group)
+        folder_hint = QLabel(
+            "CaptureVault searches your user folder and every drive on this PC. "
+            "Use Add to include a specific folder, or Scan Entire Laptop to "
+            "pick up new drives."
+        )
+        folder_hint.setWordWrap(True)
+        folder_hint.setObjectName("subtitleLabel")
+        folder_layout.addWidget(folder_hint)
         self._folder_list = QListWidget()
         folder_layout.addWidget(self._folder_list)
 
@@ -62,6 +71,9 @@ class SettingsDialog(QDialog):
         remove_btn = QPushButton("Remove")
         remove_btn.clicked.connect(self._remove_folder)
         folder_btns.addWidget(remove_btn)
+        detect_btn = QPushButton("Scan Entire Laptop")
+        detect_btn.clicked.connect(self._add_laptop_folders)
+        folder_btns.addWidget(detect_btn)
         folder_btns.addStretch()
         folder_layout.addLayout(folder_btns)
         layout.addWidget(folder_group)
@@ -122,6 +134,25 @@ class SettingsDialog(QDialog):
         self._folder_list.clear()
         for folder in self._db.get_monitored_folders():
             self._folder_list.addItem(folder["path"])
+
+    def _add_laptop_folders(self) -> None:
+        added = add_missing_laptop_folders(self._db)
+        self._load_folders()
+        if added:
+            QMessageBox.information(
+                self,
+                "Laptop Scan",
+                f"Added {len(added)} location(s):\n"
+                + "\n".join(added[:5])
+                + ("\n..." if len(added) > 5 else "")
+                + "\n\nClick Full Rescan on the main window to index them.",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Already Covered",
+                "Your user folder and all drives are already being monitored.",
+            )
 
     def _add_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Add Folder")

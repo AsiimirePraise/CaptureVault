@@ -1,55 +1,153 @@
-"""Large search bar widget."""
+"""Search bar with file-type and folder filters."""
 
-from PyQt6.QtCore import QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLineEdit, QPushButton
+from PyQt6.QtWidgets import (
+    QComboBox,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QLineEdit,
+    QPushButton,
+    QVBoxLayout,
+)
+
+from capturevault.core.search_filters import TYPE_FILTER_OPTIONS, SearchFilters
 
 
 class SearchBar(QFrame):
-    """Prominent search input with debounced typing."""
+    """Search input with type and folder scope filters."""
 
-    search_requested = pyqtSignal(str)
-    clear_requested = pyqtSignal()
+    search_triggered = pyqtSignal()
 
-    DEBOUNCE_MS = 350
+    DEBOUNCE_MS = 120
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("searchBarFrame")
+        self._custom_folder: str | None = None
+        self._monitored_folders: list[str] = []
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._emit_search)
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(20, 12, 20, 12)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(20, 10, 20, 10)
+        outer.setSpacing(8)
 
+        # Filter row
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(10)
+
+        type_label = QComboBox()
+        type_label.setMinimumWidth(130)
+        for label, key in TYPE_FILTER_OPTIONS:
+            type_label.addItem(label, key)
+        type_label.currentIndexChanged.connect(self._on_filter_changed)
+        filter_row.addWidget(type_label)
+        self._type_combo = type_label
+
+        folder_combo = QComboBox()
+        folder_combo.setMinimumWidth(200)
+        folder_combo.currentIndexChanged.connect(self._on_filter_changed)
+        filter_row.addWidget(folder_combo)
+        self._folder_combo = folder_combo
+
+        browse_btn = QPushButton("Choose Folder...")
+        browse_btn.clicked.connect(self._browse_folder)
+        filter_row.addWidget(browse_btn)
+
+        filter_row.addStretch()
+        outer.addLayout(filter_row)
+
+        # Search row
+        search_row = QHBoxLayout()
         self._input = QLineEdit()
         self._input.setObjectName("searchInput")
         self._input.setPlaceholderText(
-            "Search files, virtual names, tags, notes, collections..."
+            "Type any part of a name — files appear instantly as you type"
         )
         font = QFont("Segoe UI", 14)
         self._input.setFont(font)
         self._input.textChanged.connect(self._on_text_changed)
         self._input.returnPressed.connect(self._emit_search)
-        layout.addWidget(self._input, stretch=1)
+        search_row.addWidget(self._input, stretch=1)
 
         clear_btn = QPushButton("Clear")
         clear_btn.clicked.connect(self._clear)
-        layout.addWidget(clear_btn)
+        search_row.addWidget(clear_btn)
 
-    def _on_text_changed(self, text: str) -> None:
+        outer.addLayout(search_row)
+
+        self.set_folder_choices([])
+
+    def set_folder_choices(self, folders: list[str]) -> None:
+        """Populate folder dropdown from monitored locations."""
+        self._monitored_folders = list(folders)
+        current = self._folder_combo.currentData()
+        self._folder_combo.blockSignals(True)
+        self._folder_combo.clear()
+        self._folder_combo.addItem("All folders", None)
+
+        if self._custom_folder:
+            label = self._short_path(self._custom_folder)
+            self._folder_combo.addItem(f"Custom: {label}", self._custom_folder)
+
+        for path in folders:
+            self._folder_combo.addItem(self._short_path(path), path)
+
+        # Restore selection
+        for i in range(self._folder_combo.count()):
+            if self._folder_combo.itemData(i) == current:
+                self._folder_combo.setCurrentIndex(i)
+                break
+
+        self._folder_combo.blockSignals(False)
+
+    @staticmethod
+    def _short_path(path: str) -> str:
+        if len(path) <= 48:
+            return path
+        return "..." + path[-45:]
+
+    def _browse_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self, "Search in this folder only"
+        )
+        if not folder:
+            return
+        self._custom_folder = folder
+        self.set_folder_choices(self._monitored_folders)
+        for i in range(self._folder_combo.count()):
+            if self._folder_combo.itemData(i) == folder:
+                self._folder_combo.setCurrentIndex(i)
+                self._on_filter_changed()
+                return
+
+    def get_filters(self) -> SearchFilters:
+        return SearchFilters(
+            type_filter=self._type_combo.currentData() or "all",
+            folder_path=self._folder_combo.currentData(),
+        )
+
+    def _on_filter_changed(self) -> None:
+        self._emit_search()
+
+    def _on_text_changed(self, _text: str) -> None:
         self._timer.stop()
         self._timer.start(self.DEBOUNCE_MS)
 
     def _emit_search(self) -> None:
-        self.search_requested.emit(self._input.text())
+        self.search_triggered.emit()
 
     def _clear(self) -> None:
         self._input.clear()
-        self.clear_requested.emit()
+        self._type_combo.setCurrentIndex(0)
+        self._folder_combo.setCurrentIndex(0)
+        self._custom_folder = None
+        self.search_triggered.emit()
 
     def set_query(self, text: str) -> None:
         self._input.setText(text)
