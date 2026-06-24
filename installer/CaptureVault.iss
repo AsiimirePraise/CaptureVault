@@ -4,7 +4,7 @@
 #define MyAppName "CaptureVault"
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "CaptureVault"
-#define MyAppURL "https://github.com/your-org/CaptureVault"
+#define MyAppURL "https://github.com/AsiimirePraise/CaptureVault"
 #define MyAppExeName "CaptureVault.exe"
 
 [Setup]

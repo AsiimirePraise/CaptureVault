@@ -58,7 +58,7 @@ THEME_LIGHT = "light"
 THEME_DARK = "dark"
 
 # GitHub update configuration (override via settings)
-DEFAULT_GITHUB_REPO = "your-org/CaptureVault"
+DEFAULT_GITHUB_REPO = "AsiimirePraise/CaptureVault"
 
 # Rating search patterns
 RATING_QUERY_PREFIX = "rating:"
