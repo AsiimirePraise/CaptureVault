@@ -82,3 +82,48 @@ class IndexerWorker(QThread):
             db.close()
 
         self.finished_scan.emit(total_indexed, total_removed, total_skipped)
+
+
+class PriorityFolderWorker(QThread):
+    """Fast index of one folder so search results appear while a full scan runs."""
+
+    progress = pyqtSignal(str, int)
+    finished_scan = pyqtSignal(int, int, int)
+    error = pyqtSignal(str)
+
+    def __init__(
+        self,
+        db_path: Path,
+        folder: str,
+        photos_only: bool = False,
+        skip_dev_folders: bool = True,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._db_path = db_path
+        self._folder = folder
+        self._photos_only = photos_only
+        self._skip_dev_folders = skip_dev_folders
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        db = DatabaseManager(self._db_path)
+        try:
+            updated, removed, skipped = quick_scan_folder(
+                Path(self._folder),
+                db,
+                progress_callback=lambda f, c: self.progress.emit(f, c),
+                cancel_check=lambda: self._cancelled,
+                photos_only=self._photos_only,
+                skip_dev_folders=self._skip_dev_folders,
+            )
+        except Exception as exc:
+            self.error.emit(str(exc))
+            return
+        finally:
+            db.close()
+
+        self.finished_scan.emit(updated, removed, skipped)

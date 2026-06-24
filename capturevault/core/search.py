@@ -255,6 +255,7 @@ class SearchEngine:
             scoped = self._db.search_scoped(
                 text,
                 extensions=filters.extensions(),
+                file_types=filters.file_types(),
                 folder_prefix=filters.folder_path,
                 limit=limit,
             )

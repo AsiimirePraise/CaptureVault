@@ -667,10 +667,11 @@ class DatabaseManager:
         self,
         query: str,
         extensions: frozenset[str] | list[str] | None = None,
+        file_types: tuple[str, ...] | list[str] | None = None,
         folder_prefix: str | None = None,
         limit: int = 300,
     ) -> list[dict]:
-        """Search file names within optional extension and folder scope."""
+        """Search file names within optional extension, type, and folder scope."""
         if not query.strip():
             return []
         pattern = f"%{query.strip()}%"
@@ -691,6 +692,10 @@ class DatabaseManager:
             ph = ",".join("?" * len(ext_list))
             sql += f" AND extension IN ({ph})"
             params.extend(ext_list)
+        if file_types:
+            ph = ",".join("?" * len(file_types))
+            sql += f" AND file_type IN ({ph})"
+            params.extend(file_types)
         if folder_prefix:
             sql += " AND path LIKE ? COLLATE NOCASE"
             params.append(folder_like_pattern(folder_prefix))
@@ -713,6 +718,24 @@ class DatabaseManager:
             (folder_like_pattern(folder_prefix), limit),
         )
         return [dict(r) for r in rows]
+
+    def count_files_in_folder(
+        self,
+        folder_prefix: str,
+        file_types: tuple[str, ...] | list[str] | None = None,
+    ) -> int:
+        """Count indexed files under a folder, optionally filtered by type."""
+        params: list = [folder_like_pattern(folder_prefix)]
+        sql = """
+            SELECT COUNT(*) AS cnt FROM files
+            WHERE path LIKE ? COLLATE NOCASE
+        """
+        if file_types:
+            placeholders = ",".join("?" * len(file_types))
+            sql += f" AND file_type IN ({placeholders})"
+            params.extend(file_types)
+        row = self._fetchone(sql, tuple(params))
+        return int(row["cnt"]) if row else 0
 
     def get_tags_map_for_files(self, file_ids: list[int]) -> dict[int, list[str]]:
         if not file_ids:

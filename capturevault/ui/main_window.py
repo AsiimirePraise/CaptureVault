@@ -1,5 +1,7 @@
 """Main application window."""
 
+from pathlib import Path
+
 from PyQt6.QtCore import QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QHBoxLayout,
@@ -31,7 +33,7 @@ from capturevault.ui.views.search_view import SearchView
 from capturevault.ui.widgets.search_bar import SearchBar
 from capturevault.ui.widgets.sidebar import Sidebar
 from capturevault.updates.update_manager import UpdateManager
-from capturevault.workers.indexer_worker import IndexerWorker
+from capturevault.workers.indexer_worker import IndexerWorker, PriorityFolderWorker
 from capturevault.workers.search_worker import SearchWorker
 
 
@@ -60,9 +62,14 @@ class MainWindow(QMainWindow):
             config.thumbnail_size,
         )
         self._indexer: IndexerWorker | None = None
+        self._priority_indexer: PriorityFolderWorker | None = None
+        self._priority_folder: str | None = None
         self._search_worker: SearchWorker | None = None
         self._update_worker: UpdateCheckWorker | None = None
         self._search_generation = 0
+        self._live_search_timer = QTimer(self)
+        self._live_search_timer.setSingleShot(True)
+        self._live_search_timer.timeout.connect(self._live_search_refresh)
 
         self.setWindowTitle(f"CaptureVault v{config.version}")
         self.setMinimumSize(1100, 700)
@@ -96,7 +103,9 @@ class MainWindow(QMainWindow):
 
         # Top bar with search and scan buttons
         top_bar = QHBoxLayout()
-        self._search_bar = SearchBar(default_type_filter=config.default_search_filter)
+        self._search_bar = SearchBar(
+            default_type_filter=self._config.default_search_filter
+        )
         top_bar.addWidget(self._search_bar, stretch=1)
 
         self._scan_btn = QPushButton("Quick Scan")
@@ -154,6 +163,7 @@ class MainWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self._sidebar.navigation_changed.connect(self._on_navigate)
         self._search_bar.search_triggered.connect(self._run_search)
+        self._search_bar.folder_scope_changed.connect(self._priority_index_folder)
 
         for grid in (
             self._search_view.grid,
@@ -222,6 +232,80 @@ class MainWindow(QMainWindow):
         else:
             self._start_initial_index()
 
+    def _is_indexing(self) -> bool:
+        main = self._indexer is not None and self._indexer.isRunning()
+        priority = (
+            self._priority_indexer is not None
+            and self._priority_indexer.isRunning()
+        )
+        return main or priority
+
+    @staticmethod
+    def _should_priority_index(folder: str) -> bool:
+        """Skip whole-drive roots — those are covered by the background scan."""
+        p = folder.replace("/", "\\").rstrip("\\")
+        if len(p) == 2 and p[1] == ":":
+            return False
+        if len(p) == 3 and p[1] == ":" and p[2] == "\\":
+            return False
+        return True
+
+    def _priority_index_folder(self, folder: str) -> None:
+        if not folder or not self._should_priority_index(folder):
+            return
+        try:
+            key = str(Path(folder).resolve()).lower()
+        except OSError:
+            key = folder.lower()
+        if (
+            self._priority_folder == key
+            and self._priority_indexer
+            and self._priority_indexer.isRunning()
+        ):
+            return
+
+        self._priority_folder = key
+        if self._priority_indexer and self._priority_indexer.isRunning():
+            self._priority_indexer.cancel()
+            self._priority_indexer.wait(2000)
+
+        self._priority_indexer = PriorityFolderWorker(
+            self._config.db_path,
+            folder,
+            photos_only=self._config.photographer_mode,
+            skip_dev_folders=self._config.skip_dev_folders,
+            parent=self,
+        )
+        self._priority_indexer.progress.connect(self._on_index_progress)
+        self._priority_indexer.finished_scan.connect(self._on_priority_index_finished)
+        self._priority_indexer.error.connect(self._on_index_error)
+        self._priority_indexer.start()
+        self._progress.setVisible(True)
+        self._progress.setRange(0, 0)
+        short = folder.split("\\")[-1].split("/")[-1] or folder
+        self._status_label.setText(f"Indexing folder: {short}...")
+
+    def _on_priority_index_finished(
+        self, indexed: int, removed: int, skipped: int
+    ) -> None:
+        SearchEngine.clear_cache()
+        self._run_search()
+        if not self._is_indexing():
+            self._progress.setVisible(False)
+        if indexed:
+            self._status_label.setText(f"Folder ready — {indexed:,} photos indexed")
+
+    def _wants_live_search(self) -> bool:
+        if self._search_bar.query().strip():
+            return True
+        return bool(self._search_bar.active_folder())
+
+    def _live_search_refresh(self) -> None:
+        if not self._wants_live_search():
+            return
+        SearchEngine.clear_cache()
+        self._run_search()
+
     def _start_initial_index(self) -> None:
         """Quick scan on normal startup; full scan only when library is empty."""
         stats = self._db.get_dashboard_stats()
@@ -259,6 +343,8 @@ class MainWindow(QMainWindow):
     def _on_index_progress(self, file_path: str, count: int) -> None:
         name = file_path.split("\\")[-1].split("/")[-1]
         self._status_label.setText(f"Indexing: {name} ({count:,})")
+        if self._wants_live_search():
+            self._live_search_timer.start(350)
 
     def _on_index_finished(self, indexed: int, removed: int, skipped: int) -> None:
         self._scan_btn.setEnabled(True)
@@ -309,12 +395,34 @@ class MainWindow(QMainWindow):
         scope = f"{filters.type_label()} · {filters.folder_label()}"
 
         if not results and query:
-            empty_msg = (
-                f'No matches for "{query}" ({filters.type_label()}, '
-                f'{filters.folder_label()}).\n'
-                "The file may not be indexed yet — wait for scanning to finish,\n"
-                "try Word (.doc/.docx) filter, or click Full Rescan."
-            )
+            folder = filters.folder_path
+            indexing = self._is_indexing()
+            if folder:
+                in_folder = self._db.count_files_in_folder(
+                    folder, filters.file_types()
+                )
+                empty_msg = (
+                    f'No matches for "{query}" in {filters.folder_label()}.\n'
+                    f"{in_folder:,} photos indexed in this folder so far"
+                )
+                if indexing:
+                    empty_msg += (
+                        " — results appear live as more files are indexed."
+                    )
+                else:
+                    empty_msg += "."
+            elif indexing:
+                empty_msg = (
+                    f'No matches for "{query}" yet ({filters.type_label()}).\n'
+                    "Still indexing — matching files will appear as they are "
+                    "added. Try narrowing to a specific folder."
+                )
+            else:
+                empty_msg = (
+                    f'No matches for "{query}" ({filters.type_label()}, '
+                    f'{filters.folder_label()}).\n'
+                    "Try a different spelling or click Full Rescan."
+                )
         elif not results and total == 0:
             empty_msg = (
                 "Still indexing your files — search again in a moment,\n"
@@ -394,5 +502,8 @@ class MainWindow(QMainWindow):
         if self._indexer and self._indexer.isRunning():
             self._indexer.cancel()
             self._indexer.wait(3000)
+        if self._priority_indexer and self._priority_indexer.isRunning():
+            self._priority_indexer.cancel()
+            self._priority_indexer.wait(3000)
         self._db.close()
         super().closeEvent(event)

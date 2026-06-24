@@ -20,6 +20,7 @@ class SearchBar(QFrame):
     """Search input with type and folder scope filters."""
 
     search_triggered = pyqtSignal()
+    folder_scope_changed = pyqtSignal(str)
 
     DEBOUNCE_MS = 120
 
@@ -47,14 +48,14 @@ class SearchBar(QFrame):
         type_label.setMinimumWidth(130)
         for label, key in TYPE_FILTER_OPTIONS:
             type_label.addItem(label, key)
-        type_label.currentIndexChanged.connect(self._on_filter_changed)
+        type_label.currentIndexChanged.connect(self._on_type_filter_changed)
         filter_row.addWidget(type_label)
         self._type_combo = type_label
         self.set_type_filter(self._default_type_filter)
 
         folder_combo = QComboBox()
         folder_combo.setMinimumWidth(200)
-        folder_combo.currentIndexChanged.connect(self._on_filter_changed)
+        folder_combo.currentIndexChanged.connect(self._on_folder_changed)
         filter_row.addWidget(folder_combo)
         self._folder_combo = folder_combo
 
@@ -126,14 +127,27 @@ class SearchBar(QFrame):
         for i in range(self._folder_combo.count()):
             if self._folder_combo.itemData(i) == folder:
                 self._folder_combo.setCurrentIndex(i)
-                self._on_filter_changed()
+                self.folder_scope_changed.emit(folder)
+                self._emit_search()
                 return
+
+    def active_folder(self) -> str | None:
+        return self._folder_combo.currentData()
 
     def get_filters(self) -> SearchFilters:
         return SearchFilters(
             type_filter=self._type_combo.currentData() or self._default_type_filter,
             folder_path=self._folder_combo.currentData(),
         )
+
+    def _on_type_filter_changed(self) -> None:
+        self._emit_search()
+
+    def _on_folder_changed(self) -> None:
+        folder = self._folder_combo.currentData()
+        if folder:
+            self.folder_scope_changed.emit(folder)
+        self._emit_search()
 
     def _on_filter_changed(self) -> None:
         self._emit_search()
