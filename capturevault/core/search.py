@@ -14,6 +14,7 @@ from capturevault.constants import (
     RATING_QUERY_PREFIX,
 )
 from capturevault.core.search_filters import SearchFilters
+from capturevault.core.search_cache import SearchCache
 from capturevault.database.manager import DatabaseManager
 
 
@@ -185,10 +186,16 @@ def _score_match(query: str, searchable: str, file_data: dict) -> float:
 
 
 class SearchEngine:
-    """Combines FTS5 / SQL pre-filtering with fuzzy re-ranking."""
+    """Combines SQL fast-path, FTS5, and targeted fuzzy matching."""
+
+    _cache = SearchCache()
 
     def __init__(self, db: DatabaseManager) -> None:
         self._db = db
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        cls._cache.clear()
 
     def search(
         self,
@@ -197,6 +204,21 @@ class SearchEngine:
         filters: SearchFilters | None = None,
     ) -> list[dict]:
         filters = filters or SearchFilters()
+
+        cached = self._cache.get(query, filters)
+        if cached is not None:
+            return cached[:limit]
+
+        results = self._search_uncached(query, limit, filters)
+        self._cache.put(query, filters, results)
+        return results[:limit]
+
+    def _search_uncached(
+        self,
+        query: str,
+        limit: int,
+        filters: SearchFilters,
+    ) -> list[dict]:
         parsed = _parse_query(query)
 
         if not parsed["text"] and any(
@@ -216,7 +238,7 @@ class SearchEngine:
         ):
             if has_ui_filters:
                 return self._browse_filtered(filters, limit)
-            return self._enrich_files(
+            return self._light_enrich(
                 self._db.get_recent_files(min(limit, 200))
             )
 
@@ -224,44 +246,39 @@ class SearchEngine:
         if extension:
             files = self._db.get_files_by_extension(extension, limit=limit * 2)
             filtered = [
-                f
-                for f in files
-                if self._passes_filters(f, parsed, filters)
+                f for f in files if self._passes_filters(f, parsed, filters)
             ]
-            return self._enrich_files(filtered[:limit])
+            return self._light_enrich(filtered[:limit])
 
-        # Scoped name search — reliable for documents in a chosen folder
-        if text and (
-            filters.extensions() or filters.folder_path or filters.type_filter != "all"
-        ):
+        # Fast SQL path — filename search (fastest for most queries)
+        if text and len(text) >= 2:
             scoped = self._db.search_scoped(
                 text,
                 extensions=filters.extensions(),
                 folder_prefix=filters.folder_path,
-                limit=limit * 2,
+                limit=limit,
             )
             if scoped:
                 filtered = [
-                    f
-                    for f in scoped
-                    if self._passes_filters(f, parsed, filters)
+                    f for f in scoped if self._passes_filters(f, parsed, filters)
                 ]
                 if filtered:
-                    return self._enrich_files(filtered[:limit])
+                    return self._light_enrich(filtered[:limit])
 
-        like_limit = 1200 if len(text) <= 4 else 600
-        fts_ids = self._db.search_fts(text, limit=limit * 3)
+        like_limit = 400 if len(text) <= 4 else 300
+        fts_ids = self._db.search_fts(text, limit=limit * 2)
         like_ids = self._db.search_like(text, limit=like_limit)
         candidate_ids = list(dict.fromkeys(fts_ids + like_ids))
         like_set = set(like_ids)
+        fts_set = set(fts_ids)
 
         candidates = (
             self._db.get_files_by_ids(candidate_ids) if candidate_ids else []
         )
 
-        # Fuzzy fallback — partial names, no exact match required
-        if text and len(candidates) < limit:
-            pool = self._get_search_pool(filters, limit=2000)
+        # Small fuzzy fallback only when SQL found almost nothing
+        if text and len(candidates) < min(limit, 20):
+            pool = self._get_search_pool(filters, limit=600)
             pool_ids = {c["id"] for c in candidates}
             min_score = _min_match_score(text)
             for file_data in pool:
@@ -269,21 +286,14 @@ class SearchEngine:
                     continue
                 if not self._passes_filters(file_data, parsed, filters):
                     continue
-                tags = []  # scored lightly without tags for speed
-                searchable = _build_searchable_text(file_data, tags, [])
-                score = _score_match(text, searchable, file_data)
-                if score >= min_score:
+                searchable = _build_searchable_text(file_data, [], [])
+                if _score_match(text, searchable, file_data) >= min_score:
                     candidates.append(file_data)
                     pool_ids.add(file_data["id"])
-                if len(candidates) >= limit * 2:
+                if len(candidates) >= limit:
                     break
 
         id_order = {fid: i for i, fid in enumerate(candidate_ids)}
-        fts_set = set(fts_ids)
-
-        file_ids = [f["id"] for f in candidates]
-        tags_map = self._db.get_tags_map_for_files(file_ids)
-        collections_map = self._db.get_collections_map_for_files(file_ids)
 
         results: list[tuple[float, dict]] = []
         for file_data in candidates:
@@ -291,9 +301,7 @@ class SearchEngine:
                 continue
 
             fid = file_data["id"]
-            tags = tags_map.get(fid, [])
-            collections = collections_map.get(fid, [])
-            searchable = _build_searchable_text(file_data, tags, collections)
+            searchable = _build_searchable_text(file_data, [], [])
 
             if text:
                 score = _score_match(text, searchable, file_data)
@@ -311,11 +319,11 @@ class SearchEngine:
             else:
                 score = 100.0
 
-            enriched = dict(file_data)
-            enriched["tags"] = tags
-            enriched["collections"] = collections
-            enriched["_score"] = score
-            results.append((score, enriched))
+            item = dict(file_data)
+            item["tags"] = []
+            item["collections"] = []
+            item["_score"] = score
+            results.append((score, item))
 
         results.sort(
             key=lambda x: (-x[0], id_order.get(x[1]["id"], 999999))
@@ -347,10 +355,10 @@ class SearchEngine:
                 files = self._db.get_recent_files(limit)
 
         filtered = [f for f in files if filters.matches_file(f)]
-        return self._enrich_files(filtered[:limit])
+        return self._light_enrich(filtered[:limit])
 
     def _get_search_pool(
-        self, filters: SearchFilters, limit: int = 2000
+        self, filters: SearchFilters, limit: int = 600
     ) -> list[dict]:
         """Files to scan for fuzzy matching within current filters."""
         exts = filters.extensions()
@@ -373,6 +381,14 @@ class SearchEngine:
             else:
                 files = self._db.get_all_files(limit=limit)
         return [f for f in files if filters.matches_file(f)]
+
+    @staticmethod
+    def _light_enrich(files: list[dict]) -> list[dict]:
+        """Skip tag/collection DB lookups — not shown in the results grid."""
+        return [
+            {**dict(f), "tags": [], "collections": []}
+            for f in files
+        ]
 
     def _enrich_files(self, files: list[dict]) -> list[dict]:
         if not files:
@@ -430,7 +446,7 @@ class SearchEngine:
                     for f in files
                     if f.get("file_type") in parsed["file_type"]
                 ]
-            return self._enrich_files(files[:limit])
+            return self._light_enrich(files[:limit])
 
         if parsed["file_type"]:
             files = [
@@ -438,4 +454,4 @@ class SearchEngine:
             ]
 
         files = [f for f in files if filters.matches_file(f)]
-        return self._enrich_files(files[:limit])
+        return self._light_enrich(files[:limit])

@@ -20,12 +20,16 @@ class IndexerWorker(QThread):
         db_path: Path,
         folders: list[str],
         full_scan: bool = True,
+        photos_only: bool = False,
+        skip_dev_folders: bool = True,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._db_path = db_path
         self._folders = folders
         self._full_scan = full_scan
+        self._photos_only = photos_only
+        self._skip_dev_folders = skip_dev_folders
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -51,6 +55,8 @@ class IndexerWorker(QThread):
                         db,
                         progress_callback=lambda f, c: self.progress.emit(f, c),
                         cancel_check=self._is_cancelled,
+                        photos_only=self._photos_only,
+                        skip_dev_folders=self._skip_dev_folders,
                     )
                     total_indexed += indexed
                     total_skipped += skipped
@@ -60,6 +66,8 @@ class IndexerWorker(QThread):
                         db,
                         progress_callback=lambda f, c: self.progress.emit(f, c),
                         cancel_check=self._is_cancelled,
+                        photos_only=self._photos_only,
+                        skip_dev_folders=self._skip_dev_folders,
                     )
                     total_indexed += updated
                     total_removed += removed

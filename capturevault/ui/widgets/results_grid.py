@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -44,7 +44,8 @@ class ResultsGrid(QTableWidget):
         ("rating", "Rating", 80),
     ]
 
-    MAX_THUMBS_PER_BATCH = 80
+    MAX_THUMBS_PER_BATCH = 40
+    INITIAL_ROWS = 60
 
     def __init__(self, thumb_service: ThumbnailService, parent=None) -> None:
         super().__init__(parent)
@@ -87,44 +88,70 @@ class ResultsGrid(QTableWidget):
         self._thumb_labels.clear()
         self._files = files
 
+        if not files:
+            self.setRowCount(0)
+            return
+
+        # Paint first batch immediately, defer the rest for responsiveness
+        first_end = min(self.INITIAL_ROWS, len(files))
+        self._fill_rows(0, first_end, start_thumbs=True)
+
+        if len(files) > first_end:
+            QTimer.singleShot(
+                0,
+                lambda: self._fill_rows(
+                    first_end, len(files), start_thumbs=False
+                ),
+            )
+
+    def _fill_rows(
+        self,
+        start: int,
+        end: int,
+        start_thumbs: bool = True,
+    ) -> None:
         self.setUpdatesEnabled(False)
         try:
-            self.setRowCount(len(files))
+            if start == 0:
+                self.setRowCount(len(self._files))
+
             thumb_size = self._thumb_service.size
             thumb_batch: list[tuple[int, str, str, str]] = []
 
-            for row, file_data in enumerate(files):
+            for row in range(start, end):
+                file_data = self._files[row]
                 self.setRowHeight(row, max(thumb_size + 16, 72))
 
-                label = QLabel("…")
-                label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                label.setFixedSize(thumb_size, thumb_size)
-                label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-                container = QWidget()
-                container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-                lay = QHBoxLayout(container)
-                lay.setContentsMargins(4, 4, 4, 4)
-                lay.addWidget(label)
+                if row not in self._thumb_labels:
+                    label = QLabel("…")
+                    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    label.setFixedSize(thumb_size, thumb_size)
+                    label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                    container = QWidget()
+                    container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                    lay = QHBoxLayout(container)
+                    lay.setContentsMargins(4, 4, 4, 4)
+                    lay.addWidget(label)
 
-                color = file_data.get("color_label")
-                if color and color in COLOR_DOT:
-                    dot = QLabel("●")
-                    dot.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-                    dot.setStyleSheet(
-                        f"color: {COLOR_DOT[color]}; font-size: 14px;"
+                    color = file_data.get("color_label")
+                    if color and color in COLOR_DOT:
+                        dot = QLabel("●")
+                        dot.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                        dot.setStyleSheet(
+                            f"color: {COLOR_DOT[color]}; font-size: 14px;"
+                        )
+                        lay.addWidget(dot)
+
+                    thumb_item = QTableWidgetItem()
+                    thumb_item.setFlags(
+                        Qt.ItemFlag.ItemIsEnabled
+                        | Qt.ItemFlag.ItemIsSelectable
                     )
-                    lay.addWidget(dot)
+                    self.setItem(row, 0, thumb_item)
+                    self.setCellWidget(row, 0, container)
+                    self._thumb_labels[row] = label
 
-                # Placeholder item so the whole row selects evenly (not patchy blue)
-                thumb_item = QTableWidgetItem()
-                thumb_item.setFlags(
-                    Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-                )
-                self.setItem(row, 0, thumb_item)
-                self.setCellWidget(row, 0, container)
-                self._thumb_labels[row] = label
-
-                if row < self.MAX_THUMBS_PER_BATCH:
+                if start_thumbs and row < self.MAX_THUMBS_PER_BATCH:
                     thumb_batch.append(
                         (
                             row,
@@ -157,7 +184,7 @@ class ResultsGrid(QTableWidget):
         finally:
             self.setUpdatesEnabled(True)
 
-        if thumb_batch:
+        if start_thumbs and thumb_batch:
             self._loader.load_batch(thumb_batch)
 
     def _on_thumbnail_ready(self, row: int, thumb_path: str) -> None:

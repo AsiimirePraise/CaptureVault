@@ -6,7 +6,9 @@ from pathlib import Path
 
 from capturevault.constants import (
     DEFAULT_GITHUB_REPO,
+    DEFAULT_SEARCH_FILTER,
     DEFAULT_THUMBNAIL_SIZE,
+    GENERAL_SEARCH_FILTER,
     THEME_LIGHT,
 )
 
@@ -47,6 +49,9 @@ class AppConfig:
         "github_repo": DEFAULT_GITHUB_REPO,
         "window_geometry": None,
         "last_update_reminder": None,
+        "photographer_mode": True,
+        "default_search_filter": DEFAULT_SEARCH_FILTER,
+        "skip_dev_folders": True,
     }
 
     def __init__(self) -> None:
@@ -139,3 +144,31 @@ class AppConfig:
     @github_repo.setter
     def github_repo(self, value: str) -> None:
         self.set("github_repo", value)
+
+    @property
+    def photographer_mode(self) -> bool:
+        return bool(self.get("photographer_mode", True))
+
+    @photographer_mode.setter
+    def photographer_mode(self, value: bool) -> None:
+        self.set("photographer_mode", value)
+        if value:
+            self.default_search_filter = DEFAULT_SEARCH_FILTER
+        else:
+            self.default_search_filter = GENERAL_SEARCH_FILTER
+
+    @property
+    def default_search_filter(self) -> str:
+        return self.get("default_search_filter", DEFAULT_SEARCH_FILTER)
+
+    @default_search_filter.setter
+    def default_search_filter(self, value: str) -> None:
+        self.set("default_search_filter", value)
+
+    @property
+    def skip_dev_folders(self) -> bool:
+        return bool(self.get("skip_dev_folders", True))
+
+    @skip_dev_folders.setter
+    def skip_dev_folders(self, value: bool) -> None:
+        self.set("skip_dev_folders", value)

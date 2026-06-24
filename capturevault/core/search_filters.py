@@ -15,8 +15,8 @@ WORD_EXTENSIONS = frozenset({".doc", ".docx", ".odt", ".rtf"})
 
 # (label, filter key)
 TYPE_FILTER_OPTIONS: list[tuple[str, str]] = [
+    ("Images + RAW", "images"),
     ("All file types", "all"),
-    ("Images", "images"),
     ("RAW photos", "raw"),
     ("Videos", "videos"),
     ("PDF only", "pdf"),
@@ -44,7 +44,7 @@ TYPE_TO_EXTENSIONS: dict[str, frozenset[str]] = {
 class SearchFilters:
     """UI-selected search scope."""
 
-    type_filter: str = "all"
+    type_filter: str = "images"
     folder_path: str | None = None
 
     def file_types(self) -> tuple[str, ...] | None:

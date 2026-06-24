@@ -98,6 +98,27 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(appear_group)
 
+        # Library mode
+        library_group = QGroupBox("Library Mode")
+        library_layout = QVBoxLayout(library_group)
+        library_hint = QLabel(
+            "Photographer mode indexes only images and RAW files, skips dev "
+            "and system folders, and defaults search to Images + RAW."
+        )
+        library_hint.setWordWrap(True)
+        library_hint.setObjectName("subtitleLabel")
+        library_layout.addWidget(library_hint)
+
+        self._photographer_check = QCheckBox("Photographer mode (images + RAW only)")
+        self._photographer_check.setChecked(self._config.photographer_mode)
+        library_layout.addWidget(self._photographer_check)
+
+        self._skip_dev_check = QCheckBox("Skip dev and cache folders while indexing")
+        self._skip_dev_check.setChecked(self._config.skip_dev_folders)
+        library_layout.addWidget(self._skip_dev_check)
+
+        layout.addWidget(library_group)
+
         # Updates
         update_group = QGroupBox("Updates")
         update_layout = QVBoxLayout(update_group)
@@ -224,7 +245,25 @@ class SettingsDialog(QDialog):
         self._config.theme = self._theme_combo.currentData()
         self._config.thumbnail_size = self._thumb_spin.value()
         self._config.check_updates_on_startup = self._check_updates.isChecked()
+        self._config.photographer_mode = self._photographer_check.isChecked()
+        self._config.skip_dev_folders = self._skip_dev_check.isChecked()
+        if self._config.photographer_mode:
+            self._config.default_search_filter = "images"
+        else:
+            self._config.default_search_filter = "all"
         self.accept()
+
+    @property
+    def photographer_mode_changed(self) -> bool:
+        return self._photographer_check.isChecked()
+
+    @property
+    def skip_dev_folders_changed(self) -> bool:
+        return self._skip_dev_check.isChecked()
+
+    @property
+    def default_search_filter_changed(self) -> str:
+        return "images" if self._photographer_check.isChecked() else "all"
 
     @property
     def theme_changed(self) -> str:

@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
 )
 
 from capturevault.config import AppConfig
+from capturevault.core.search import SearchEngine
 from capturevault.core.thumbnails import ThumbnailService
 from capturevault.database.manager import DatabaseManager
 from capturevault.ui.dialogs.metadata_dialog import MetadataDialog
@@ -95,7 +96,7 @@ class MainWindow(QMainWindow):
 
         # Top bar with search and scan buttons
         top_bar = QHBoxLayout()
-        self._search_bar = SearchBar()
+        self._search_bar = SearchBar(default_type_filter=config.default_search_filter)
         top_bar.addWidget(self._search_bar, stretch=1)
 
         self._scan_btn = QPushButton("Quick Scan")
@@ -201,7 +202,11 @@ class MainWindow(QMainWindow):
             folder_count = len(self._db.get_monitored_folders())
             QTimer.singleShot(
                 400,
-                lambda: WelcomeDialog(folder_count, self).exec(),
+                lambda: WelcomeDialog(
+                    folder_count,
+                    photographer_mode=self._config.photographer_mode,
+                    parent=self,
+                ).exec(),
             )
 
         self._sidebar.select("search")
@@ -239,7 +244,12 @@ class MainWindow(QMainWindow):
         self._status_label.setText(f"{label} in progress...")
 
         self._indexer = IndexerWorker(
-            self._config.db_path, folders, full_scan=full, parent=self
+            self._config.db_path,
+            folders,
+            full_scan=full,
+            photos_only=self._config.photographer_mode,
+            skip_dev_folders=self._config.skip_dev_folders,
+            parent=self,
         )
         self._indexer.progress.connect(self._on_index_progress)
         self._indexer.finished_scan.connect(self._on_index_finished)
@@ -260,6 +270,7 @@ class MainWindow(QMainWindow):
         self._status_label.setText(msg)
         self._dashboard.refresh()
         self._refresh_folder_filters()
+        SearchEngine.clear_cache()
         self._run_search()
 
     def _on_index_error(self, message: str) -> None:
@@ -339,12 +350,34 @@ class MainWindow(QMainWindow):
             self._dashboard.refresh()
 
     def _open_settings(self) -> None:
+        prev_photographer = self._config.photographer_mode
+        prev_skip_dev = self._config.skip_dev_folders
         dialog = SettingsDialog(self._config, self._db, self)
         if dialog.exec():
             self._apply_theme()
             self._thumb_service.size = self._config.thumbnail_size
+            self._search_bar.set_default_type_filter(
+                dialog.default_search_filter_changed
+            )
             self._refresh_folder_filters()
             self._dashboard.refresh()
+            self._run_search()
+
+            mode_changed = (
+                prev_photographer != dialog.photographer_mode_changed
+                or prev_skip_dev != dialog.skip_dev_folders_changed
+            )
+            if mode_changed:
+                reply = QMessageBox.question(
+                    self,
+                    "Rescan Recommended",
+                    "Library mode changed. Run a full rescan now to update "
+                    "which files are indexed?",
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No,
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    self._start_scan(full=True)
 
     def _check_updates(self) -> None:
         manager = UpdateManager(self._config.github_repo, self._config.version)

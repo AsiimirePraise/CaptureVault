@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from capturevault.constants import ALL_EXTENSIONS, COLOR_LABELS
+from capturevault.constants import ALL_EXTENSIONS, PHOTOGRAPHER_EXTENSIONS, COLOR_LABELS
 
 
 def _classify_extension(ext: str) -> str:
@@ -66,7 +66,34 @@ class DatabaseManager:
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA cache_size=-64000")
+            self._conn.execute("PRAGMA temp_store=MEMORY")
+            self._conn.execute("PRAGMA mmap_size=268435456")
         return self._conn
+
+    def _apply_migrations(self) -> None:
+        """Apply lightweight schema upgrades for existing databases."""
+        with self._lock:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT MAX(version) AS v FROM schema_version"
+            ).fetchone()
+            version = int(row["v"] or 1) if row else 1
+            if version < 2:
+                conn.executescript(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_files_extension
+                        ON files(extension);
+                    CREATE INDEX IF NOT EXISTS idx_files_file_name
+                        ON files(file_name COLLATE NOCASE);
+                    CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
+                    CREATE INDEX IF NOT EXISTS idx_files_type_ext
+                        ON files(file_type, extension);
+                    INSERT OR IGNORE INTO schema_version (version) VALUES (2);
+                    """
+                )
+                conn.commit()
 
     def _init_db(self) -> None:
         schema_path = Path(__file__).parent / "schema.sql"
@@ -75,6 +102,7 @@ class DatabaseManager:
             conn = self._connect()
             conn.executescript(schema)
             conn.commit()
+        self._apply_migrations()
 
     def close(self) -> None:
         with self._lock:
@@ -128,8 +156,11 @@ class DatabaseManager:
     # --- File indexing ---
 
     @staticmethod
-    def is_supported_file(path: Path) -> bool:
-        return path.suffix.lower() in ALL_EXTENSIONS
+    def is_supported_file(path: Path, photos_only: bool = False) -> bool:
+        ext = path.suffix.lower()
+        if photos_only:
+            return ext in PHOTOGRAPHER_EXTENSIONS
+        return ext in ALL_EXTENSIONS
 
     def upsert_file(self, file_path: Path) -> int | None:
         """Insert or update file metadata. Returns file id."""

@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from capturevault.constants import DEFAULT_SEARCH_FILTER
 from capturevault.core.search_filters import TYPE_FILTER_OPTIONS, SearchFilters
 
 
@@ -22,8 +23,9 @@ class SearchBar(QFrame):
 
     DEBOUNCE_MS = 120
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, default_type_filter: str = DEFAULT_SEARCH_FILTER, parent=None) -> None:
         super().__init__(parent)
+        self._default_type_filter = default_type_filter
         self.setObjectName("searchBarFrame")
         self._custom_folder: str | None = None
         self._monitored_folders: list[str] = []
@@ -48,6 +50,7 @@ class SearchBar(QFrame):
         type_label.currentIndexChanged.connect(self._on_filter_changed)
         filter_row.addWidget(type_label)
         self._type_combo = type_label
+        self.set_type_filter(self._default_type_filter)
 
         folder_combo = QComboBox()
         folder_combo.setMinimumWidth(200)
@@ -128,7 +131,7 @@ class SearchBar(QFrame):
 
     def get_filters(self) -> SearchFilters:
         return SearchFilters(
-            type_filter=self._type_combo.currentData() or "all",
+            type_filter=self._type_combo.currentData() or self._default_type_filter,
             folder_path=self._folder_combo.currentData(),
         )
 
@@ -142,9 +145,21 @@ class SearchBar(QFrame):
     def _emit_search(self) -> None:
         self.search_triggered.emit()
 
+    def set_type_filter(self, filter_key: str) -> None:
+        """Select file type filter by key (e.g. images, all)."""
+        idx = self._type_combo.findData(filter_key)
+        if idx >= 0:
+            self._type_combo.blockSignals(True)
+            self._type_combo.setCurrentIndex(idx)
+            self._type_combo.blockSignals(False)
+
+    def set_default_type_filter(self, filter_key: str) -> None:
+        self._default_type_filter = filter_key
+        self.set_type_filter(filter_key)
+
     def _clear(self) -> None:
         self._input.clear()
-        self._type_combo.setCurrentIndex(0)
+        self.set_type_filter(self._default_type_filter)
         self._folder_combo.setCurrentIndex(0)
         self._custom_folder = None
         self.search_triggered.emit()

@@ -10,8 +10,9 @@ from capturevault.database.manager import DatabaseManager
 def _iter_files(
     folder_path: Path,
     cancel_check=None,
+    skip_dev_folders: bool = True,
 ):
-    """Walk folder tree, skipping system and cache directories."""
+    """Walk folder tree, skipping system and optional dev/cache directories."""
     folder_path = folder_path.resolve()
     if not folder_path.exists():
         return
@@ -23,7 +24,7 @@ def _iter_files(
         dirnames[:] = [
             d
             for d in dirnames
-            if not should_skip_dir(Path(dirpath) / d)
+            if not should_skip_dir(Path(dirpath) / d, skip_dev=skip_dev_folders)
         ]
 
         for name in filenames:
@@ -37,6 +38,8 @@ def scan_folder(
     db: DatabaseManager,
     progress_callback=None,
     cancel_check=None,
+    photos_only: bool = False,
+    skip_dev_folders: bool = True,
 ) -> tuple[int, int]:
     """
     Recursively scan a folder and index supported files.
@@ -45,10 +48,12 @@ def scan_folder(
     indexed = 0
     skipped = 0
 
-    for file_path in _iter_files(folder_path, cancel_check):
+    for file_path in _iter_files(
+        folder_path, cancel_check, skip_dev_folders=skip_dev_folders
+    ):
         if not file_path.is_file():
             continue
-        if not DatabaseManager.is_supported_file(file_path):
+        if not DatabaseManager.is_supported_file(file_path, photos_only):
             skipped += 1
             continue
         result = db.upsert_file(file_path)
@@ -67,6 +72,8 @@ def quick_scan_folder(
     db: DatabaseManager,
     progress_callback=None,
     cancel_check=None,
+    photos_only: bool = False,
+    skip_dev_folders: bool = True,
 ) -> tuple[int, int, int]:
     """
     Quick scan: add new files and update changed files.
@@ -89,11 +96,13 @@ def quick_scan_folder(
             db.remove_file_by_path(path)
         return 0, len(existing), 0
 
-    for file_path in _iter_files(folder_path, cancel_check):
+    for file_path in _iter_files(
+        folder_path, cancel_check, skip_dev_folders=skip_dev_folders
+    ):
         if not file_path.is_file():
             continue
         resolved = str(file_path.resolve())
-        if not DatabaseManager.is_supported_file(file_path):
+        if not DatabaseManager.is_supported_file(file_path, photos_only):
             skipped += 1
             continue
 
