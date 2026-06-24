@@ -5,8 +5,8 @@ import sys
 from pathlib import Path
 
 block_cipher = None
-root = Path(SPECPATH).parent
-project_root = root.parent
+# SPECPATH is the build/ directory when running: pyinstaller build/capturevault.spec
+project_root = Path(SPECPATH).parent
 
 a = Analysis(
     [str(project_root / "capturevault" / "main.py")],
