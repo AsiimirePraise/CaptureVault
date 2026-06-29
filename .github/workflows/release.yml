@@ -9,9 +9,11 @@ permissions:
   contents: write
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Windows build: produces CaptureVault.exe + CaptureVaultSetup.exe
+  # ---------------------------------------------------------------------------
   build-windows:
     runs-on: windows-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,7 +29,6 @@ jobs:
           pip install -r requirements.txt
 
       - name: Build executable with PyInstaller
-        working-directory: .
         run: |
           pyinstaller build/capturevault.spec --noconfirm
           if (-not (Test-Path dist/CaptureVault.exe)) { exit 1 }
@@ -41,12 +42,76 @@ jobs:
           (Get-Content installer/CaptureVault.iss) -replace '#define MyAppVersion ".*"', "#define MyAppVersion `"$version`"" | Set-Content installer/CaptureVault.iss
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer/CaptureVault.iss
 
+      - name: Stage Windows artifacts
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item dist/CaptureVault.exe out/
+          Copy-Item dist/installer/CaptureVaultSetup.exe out/
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: out/*
+
+  # ---------------------------------------------------------------------------
+  # macOS build: produces a .dmg containing CaptureVault.app (Apple Silicon)
+  # ---------------------------------------------------------------------------
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build .app with PyInstaller
+        run: |
+          pyinstaller build/capturevault-macos.spec --noconfirm
+          test -d "dist/CaptureVault.app" || { echo "App bundle not produced"; exit 1; }
+
+      - name: Package .dmg
+        run: |
+          VERSION=$(tr -d '[:space:]' < version.txt)
+          mkdir -p out
+          hdiutil create \
+            -volname "CaptureVault" \
+            -srcfolder "dist/CaptureVault.app" \
+            -ov -format UDZO \
+            "out/CaptureVault-${VERSION}-macOS-AppleSilicon.dmg"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: out/*
+
+  # ---------------------------------------------------------------------------
+  # Single release: waits for both builds, then attaches everything to the tag
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/CaptureVault.exe
-            dist/installer/CaptureVaultSetup.exe
+            artifacts/windows/*
+            artifacts/macos/*
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
